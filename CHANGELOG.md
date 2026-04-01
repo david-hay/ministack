@@ -15,6 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 - **CloudFormation Lambda `ZipFile`** — inline `Code.ZipFile` source is now correctly packaged into a zip archive, making CFN-deployed Lambda functions invokable
 - **CloudFormation async task** — replaced deprecated `asyncio.ensure_future()` with `asyncio.get_event_loop().create_task()` in stack deploy, delete, and change set execution
+- **README architecture diagram** — fixed box alignment and added CloudFormation to service list. Contributed by @oefrha (HackerNews)
 
 ### Tests
 - 788 tests total, all passing

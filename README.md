@@ -458,34 +458,35 @@ MiniStack keeps Python Lambda functions warm between invocations. After the firs
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────┐
- AWS CLI / boto3    │         ASGI Gateway  :4566             │
- Terraform / CDK ──►│  ┌───────────────────────────────────┐  │
+                    ┌──────────────────────────────────────────┐
+ AWS CLI / boto3    │         ASGI Gateway  :4566              │
+ Terraform / CDK ──►│  ┌────────────────────────────────────┐  │
  Any AWS SDK        │  │          Request Router            │  │
                     │  │  1. X-Amz-Target header            │  │
-                    │  │  2. Authorization credential scope  │  │
-                    │  │  3. Action query param              │  │
-                    │  │  4. URL path pattern                │  │
-                    │  │  5. Host header                     │  │
-                    │  │  6. Default → S3                    │  │
-                    │  └──────────────┬────────────────────┘  │
+                    │  │  2. Authorization credential scope │  │
+                    │  │  3. Action query param             │  │
+                    │  │  4. URL path pattern               │  │
+                    │  │  5. Host header                    │  │
+                    │  │  6. Default → S3                   │  │
+                    │  └────────────────┬───────────────────┘  │
                     │                 │                        │
-                    │  ┌──────────────▼──────────────────┐    │
-                    │  │         Service Handlers         │    │
-                    │  │                                  │    │
-                    │  │  S3    SQS    SNS    DynamoDB     │    │
-                    │  │  Lambda   IAM   STS   Secrets    │    │
-                    │  │  SSM   EventBridge   Kinesis     │    │
-                    │  │  CW Logs  CW Metrics  SES  SESv2 │    │
-                    │  │  Step Functions  API GW v1/v2    │    │
-                    │  │  ECS   RDS   ElastiCache  Glue   │    │
-                    │  │  Athena  Firehose  Route53        │    │
-                    │  │  Cognito  EC2  EMR  EBS  EFS     │    │
-                    │  │  ALB/ELBv2  ACM  WAFv2          │    │
-                    │  └──────────────────────────────────┘    │
+                    │  ┌────────────────────────────────────┐  │
+                    │  │         Service Handlers           │  │
+                    │  │                                    │  │
+                    │  │  S3      SQS    SNS    DynamoDB    │  │
+                    │  │  Lambda  IAM    STS    Secrets     │  │
+                    │  │  SSM     EventBridge   Kinesis     │  │
+                    │  │  CW Logs   CW Metrics  SES  SESv2  │  │
+                    │  │  Step Functions  API GW v1/v2      │  │
+                    │  │  ECS   RDS   ElastiCache   Glue    │  │
+                    │  │  Athena   Firehose   Route53       │  │
+                    │  │  Cognito  EC2   EMR   EBS   EFS    │  │
+                    │  │  ALB/ELBv2   ACM   WAF v2          │  │
+                    │  │  CloudFormation                    │  │
+                    │  └────────────────────────────────────┘  │
                     │                                          │
                     │  In-Memory Storage + Optional Docker     │
-                    └─────────────────────────────────────────┘
+                    └──────────────────────────────────────────┘
                                         │
                          ┌──────────────┼──────────────┐
                          ▼              ▼              ▼
