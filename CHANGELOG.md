@@ -7,15 +7,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [1.1.48] — 2026-04-07
 
 ### Added
-- **Step Functions query-protocol `aws-sdk:*` task dispatcher** — Task states can now call query-protocol AWS services (RDS, SQS, SNS, ElastiCache, EC2, IAM, STS, CloudWatch) via `arn:aws:states:::aws-sdk:<service>:<action>` resource ARNs. Converts JSON parameters to query-encoded form data and parses XML responses back to JSON. Contributed by @jayjanssen
+- **S3 Files service (21 operations)** — CreateFileSystem, GetFileSystem, ListFileSystems, DeleteFileSystem, CreateMountTarget, GetMountTarget, ListMountTargets, UpdateMountTarget, DeleteMountTarget, CreateAccessPoint, GetAccessPoint, ListAccessPoints, DeleteAccessPoint, policies, synchronization config, tagging. First emulator to support AWS S3 Files (launched April 7 2026). 39 services total.
+- **Step Functions query-protocol aws-sdk:* dispatcher** — extends the generic aws-sdk dispatcher to support query-protocol services: RDS, SQS, SNS, ElastiCache, EC2, IAM, STS, CloudWatch. XML responses automatically converted to JSON. Contributed by @jayjanssen (#174)
+- **Cognito RSA JWT signing** — tokens now signed with the RSA private key matching the JWKS endpoint. Adds `username` claim to access tokens. Contributed by @MartinsMLX (#172)
 
 ### Tests
-- 4 new tests: `aws-sdk:rds` Step Functions task dispatch — CreateDBCluster+DescribeDBClusters, CreateDBInstance+DescribeDBInstances, ModifyDBCluster, and error propagation for missing clusters. Contributed by @jayjanssen
+- Comprehensive aws-sdk:secretsmanager SFN task dispatch coverage. Contributed by @jayjanssen (#173)
+- 1054 tests total
 
 ---
+
 ## [1.1.47] — 2026-04-07
 
 ### Added
