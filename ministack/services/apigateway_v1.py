@@ -105,6 +105,7 @@ _usage_plan_keys = AccountScopedDict()     # plan_id -> {key_id -> UsagePlanKey}
 _domain_names = AccountScopedDict()        # domain_name -> DomainName
 _base_path_mappings = AccountScopedDict()  # domain_name -> {base_path -> BasePathMapping}
 _v1_tags = AccountScopedDict()             # resource_arn -> {key -> value}
+_account_settings = AccountScopedDict()    # singleton per account: stores fields set via UpdateAccount
 
 
 # ---- Helpers ----
@@ -117,6 +118,38 @@ def _new_id():
 def _v1_response(data, status=200):
     """API Gateway v1 uses application/json."""
     return status, {"Content-Type": "application/json"}, json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
+def _encode_rest_api_policy(policy):
+    """Match AWS's wire shape for the RestApi.policy field.
+
+    terraform-provider-aws's ``flattenAPIPolicy`` wraps the SDK-decoded policy
+    string in outer quotes and re-parses it as JSON
+    (``NormalizeJsonString(`"` + policy + `"`)`` then ``strconv.Unquote``).
+    For that roundtrip to work, AWS returns the policy already JSON-string
+    escape-encoded — e.g. ``{\\"Statement\\":[...]}`` — so the provider's
+    wrap-and-reparse recovers the original policy JSON. Emitting the raw
+    policy string (what ministack used to do) makes the provider's decoder
+    error with ``invalid character 'S' after top-level value`` as soon as the
+    policy contains an inner quote.
+    """
+    if policy is None or policy == "":
+        return policy
+    if not isinstance(policy, str):
+        policy = json.dumps(policy, ensure_ascii=False)
+    # json.dumps("abc") -> '"abc"'; strip the outer quotes to get the
+    # escape-sequence form the provider expects to see in *Policy.
+    return json.dumps(policy, ensure_ascii=False)[1:-1]
+
+
+def _rest_api_view(api):
+    """Return a response-shaped copy with the policy field properly encoded."""
+    if api is None:
+        return api
+    view = dict(api)
+    if "policy" in view:
+        view["policy"] = _encode_rest_api_policy(view["policy"])
+    return view
 
 
 def _v1_error(code, message, status):
@@ -274,6 +307,7 @@ def get_state():
         "domain_names": _domain_names,
         "base_path_mappings": _base_path_mappings,
         "v1_tags": _v1_tags,
+        "account_settings": _account_settings,
     }
 
 
@@ -291,6 +325,7 @@ def load_persisted_state(data):
     _domain_names.update(data.get("domain_names", {}))
     _base_path_mappings.update(data.get("base_path_mappings", {}))
     _v1_tags.update(data.get("v1_tags", {}))
+    _account_settings.update(data.get("account_settings", {}))
 
 
 def reset():
@@ -307,6 +342,7 @@ def reset():
     _domain_names.clear()
     _base_path_mappings.clear()
     _v1_tags.clear()
+    _account_settings.clear()
 
 
 # ---- Control plane router ----
@@ -324,6 +360,13 @@ async def handle_request(method, path, headers, body, query_params):
         return _v1_error("NotFoundException", f"Unknown path: {path}", 404)
 
     top = parts[0]
+
+    if top == "account":
+        if method == "GET":
+            return _get_account()
+        if method == "PATCH":
+            return _update_account(data)
+        return _v1_error("MethodNotAllowedException", f"Method not allowed: {method} /account", 405)
 
     if top == "tags":
         # /tags/{resourceArn} — ARN may contain slashes
@@ -825,18 +868,18 @@ def _create_rest_api(data):
     _resources[api_id][root_id] = root_resource
 
     _v1_tags[_rest_api_arn(api_id)] = dict(data.get("tags", {}))
-    return _v1_response(api, 201)
+    return _v1_response(_rest_api_view(api), 201)
 
 
 def _get_rest_api(api_id):
     api = _rest_apis.get(api_id)
     if not api:
         return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
-    return _v1_response(api)
+    return _v1_response(_rest_api_view(api))
 
 
 def _get_rest_apis():
-    return _v1_response({"item": list(_rest_apis.values()), "nextToken": None})
+    return _v1_response({"item": [_rest_api_view(a) for a in _rest_apis.values()], "nextToken": None})
 
 
 def _update_rest_api(api_id, data):
@@ -845,7 +888,7 @@ def _update_rest_api(api_id, data):
         return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
     patch_ops = data.get("patchOperations", [])
     _apply_patch(api, patch_ops)
-    return _v1_response(api)
+    return _v1_response(_rest_api_view(api))
 
 
 def _delete_rest_api(api_id):
@@ -1570,3 +1613,32 @@ def _untag_v1_resource(resource_arn, tag_keys):
     for key in tag_keys:
         existing.pop(key, None)
     return 204, {}, b""
+
+
+# ---- Control plane: Account ----
+# GetAccount / UpdateAccount — singleton per AWS account. Terraform's
+# aws_api_gateway_account resource reads and writes /account with a single
+# patch op for cloudwatchRoleArn.
+
+_ACCOUNT_DEFAULTS = {
+    "cloudwatchRoleArn": None,
+    "throttleSettings": {"burstLimit": 5000, "rateLimit": 10000},
+    "features": ["UsagePlans"],
+    "apiKeyVersion": "4",
+}
+
+
+def _get_account():
+    overrides = _account_settings.get("settings") or {}
+    merged = {**_ACCOUNT_DEFAULTS, **overrides}
+    # throttleSettings is a dict — merge nested so a partial override keeps the other limit
+    if "throttleSettings" in overrides:
+        merged["throttleSettings"] = {**_ACCOUNT_DEFAULTS["throttleSettings"], **overrides["throttleSettings"]}
+    return _v1_response(merged)
+
+
+def _update_account(data):
+    current = dict(_account_settings.get("settings") or {})
+    _apply_patch(current, data.get("patchOperations", []))
+    _account_settings["settings"] = current
+    return _get_account()
