@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- **CloudFront Functions API (stub)** — `CreateFunction`, `DescribeFunction`, `GetFunction`, `ListFunctions`, `PublishFunction`, `UpdateFunction`, and `DeleteFunction` under `/2020-05-31/function*`, returning XML `FunctionSummary` / `FunctionList` plus `ETag` headers where the AWS SDK expects them, and raw function bytes on `GetFunction`. Covers Terraform `aws_cloudfront_function` (create + `publish` + read + delete) and attaching a function ARN to distribution cache behaviors. **Limitations:** in-memory only (same persistence bucket as other CloudFront state); no `TestFunction`; `KeyValueStoreAssociations` are not modeled (responses use empty associations); no execution of CloudFront Functions at the edge; `DescribeFunction` requires the `Stage` query parameter (`DEVELOPMENT` \| `LIVE`), matching AWS; `UpdateFunction` invalidates the emulated LIVE revision until the next `PublishFunction`.
+
+---
+
 ## [1.3.11] — 2026-04-24
 
 ### Added

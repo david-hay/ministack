@@ -541,3 +541,80 @@ def test_oac_invalid_signing_protocol(cloudfront):
         cloudfront.create_origin_access_control(OriginAccessControlConfig=cfg)
     assert exc.value.response["Error"]["Code"] == "InvalidArgument"
     assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+
+
+def _cf_resp_etag(resp):
+    h = resp.get("ResponseMetadata", {}).get("HTTPHeaders") or {}
+    return resp.get("ETag") or h.get("etag") or h.get("ETag")
+
+
+def test_cloudfront_function_create_publish_describe_get_delete(cloudfront):
+    """CloudFront Functions API — matches Terraform aws_cloudfront_function (create + publish + read + delete)."""
+    name = f"fn-tf-{_uuid_mod.uuid4().hex[:8]}"
+    code = b"function handler(event) { return event.request; }"
+    cr = cloudfront.create_function(
+        Name=name,
+        FunctionConfig={"Comment": "strip", "Runtime": "cloudfront-js-1.0"},
+        FunctionCode=code,
+    )
+    assert cr["ResponseMetadata"]["HTTPStatusCode"] == 201
+    assert cr["FunctionSummary"]["Name"] == name
+    assert cr["FunctionSummary"]["FunctionMetadata"]["Stage"] == "DEVELOPMENT"
+    dev_etag = _cf_resp_etag(cr)
+    assert dev_etag
+
+    pub = cloudfront.publish_function(Name=name, IfMatch=dev_etag)
+    assert pub["FunctionSummary"]["FunctionMetadata"]["Stage"] == "LIVE"
+    live_etag = _cf_resp_etag(pub)
+    assert live_etag
+
+    d_dev = cloudfront.describe_function(Name=name, Stage="DEVELOPMENT")
+    assert _cf_resp_etag(d_dev) == dev_etag
+    d_live = cloudfront.describe_function(Name=name, Stage="LIVE")
+    assert _cf_resp_etag(d_live) == live_etag
+
+    gf = cloudfront.get_function(Name=name, Stage="DEVELOPMENT")
+    body = gf["FunctionCode"]
+    got = body.read() if hasattr(body, "read") else body
+    assert got == code
+
+    lst = cloudfront.list_functions()
+    qty = lst["FunctionList"]["Quantity"]
+    assert qty >= 2
+
+    cloudfront.delete_function(Name=name, IfMatch=_cf_resp_etag(d_dev))
+
+    with pytest.raises(ClientError) as exc:
+        cloudfront.describe_function(Name=name, Stage="DEVELOPMENT")
+    assert exc.value.response["Error"]["Code"] == "NoSuchFunctionExists"
+
+
+def test_cloudfront_function_duplicate_name(cloudfront):
+    name = f"fn-dup-{_uuid_mod.uuid4().hex[:8]}"
+    cloudfront.create_function(
+        Name=name,
+        FunctionConfig={"Comment": "", "Runtime": "cloudfront-js-1.0"},
+        FunctionCode=b"x",
+    )
+    with pytest.raises(ClientError) as exc:
+        cloudfront.create_function(
+            Name=name,
+            FunctionConfig={"Comment": "", "Runtime": "cloudfront-js-1.0"},
+            FunctionCode=b"y",
+        )
+    assert exc.value.response["Error"]["Code"] == "FunctionAlreadyExists"
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+
+
+def test_cloudfront_function_describe_requires_stage(cloudfront):
+    """DescribeFunction without Stage query param — AWS requires Stage; MiniStack returns InvalidArgument."""
+    name = f"fn-nostage-{_uuid_mod.uuid4().hex[:8]}"
+    cloudfront.create_function(
+        Name=name,
+        FunctionConfig={"Comment": "", "Runtime": "cloudfront-js-1.0"},
+        FunctionCode=b"//",
+    )
+    with pytest.raises(ClientError) as exc:
+        cloudfront.describe_function(Name=name)
+    assert exc.value.response["Error"]["Code"] == "InvalidArgument"
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
