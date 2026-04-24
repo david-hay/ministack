@@ -44,6 +44,30 @@ def test_cloudfront_create_distribution(cloudfront):
     assert dist["Status"] == "Deployed"
     assert resp["ResponseMetadata"]["HTTPStatusCode"] == 201
 
+
+def test_cloudfront_create_distribution_with_tags(cloudfront):
+    """CreateDistributionWithTags (Terraform aws_cloudfront_distribution tags) unwraps inner config."""
+    if not hasattr(cloudfront, "create_distribution_with_tags"):
+        pytest.skip("boto3 has no create_distribution_with_tags")
+    ref = f"cf-with-tags-{_uuid_mod.uuid4().hex[:12]}"
+    cfg = {**_CF_DIST_CONFIG, "CallerReference": ref}
+    resp = cloudfront.create_distribution_with_tags(
+        DistributionConfigWithTags={
+            "DistributionConfig": cfg,
+            "Tags": {"Items": [{"Key": "env", "Value": "test"}]},
+        }
+    )
+    dist = resp["Distribution"]
+    dist_id = dist["Id"]
+    dist_arn = dist["ARN"]
+    assert dist["DomainName"].endswith(".cloudfront.net")
+    tags = cloudfront.list_tags_for_resource(Resource=dist_arn)["Tags"]["Items"]
+    assert any(t["Key"] == "env" and t["Value"] == "test" for t in tags)
+    etag = resp["ETag"]
+    disabled_cfg = {**cfg, "Enabled": False}
+    upd = cloudfront.update_distribution(DistributionConfig=disabled_cfg, Id=dist_id, IfMatch=etag)
+    cloudfront.delete_distribution(Id=dist_id, IfMatch=upd["ETag"])
+
 def test_cloudfront_list_distributions(cloudfront):
     cfg_a = {**_CF_DIST_CONFIG, "CallerReference": "cf-list-a", "Comment": "list-a"}
     cfg_b = {**_CF_DIST_CONFIG, "CallerReference": "cf-list-b", "Comment": "list-b"}
