@@ -10,9 +10,12 @@ Supports:
   Origin Access Control (OAC): CreateOriginAccessControl, GetOriginAccessControl,
                  GetOriginAccessControlConfig, ListOriginAccessControls,
                  UpdateOriginAccessControl, DeleteOriginAccessControl
+  Functions (stub): CreateFunction, DeleteFunction, DescribeFunction, GetFunction,
+                 ListFunctions, PublishFunction, UpdateFunction
   Tags: TagResource, UntagResource, ListTagsForResource
 """
 
+import base64
 import copy
 import logging
 import os
@@ -46,6 +49,11 @@ _OAC_RE      = re.compile(r"^/2020-05-31/origin-access-control/?$")
 _OAC_CFG_RE  = re.compile(r"^/2020-05-31/origin-access-control/([^/]+)/config$")
 _OAC_ID_RE   = re.compile(r"^/2020-05-31/origin-access-control/([^/]+)/?$")
 
+_FUN_LIST_RE     = re.compile(r"^/2020-05-31/function/?$")
+_FUN_DESCRIBE_RE = re.compile(r"^/2020-05-31/function/([^/]+)/describe/?$")
+_FUN_PUBLISH_RE  = re.compile(r"^/2020-05-31/function/([^/]+)/publish/?$")
+_FUN_NAME_RE     = re.compile(r"^/2020-05-31/function/([^/]+)/?$")
+
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
@@ -53,6 +61,7 @@ _distributions = AccountScopedDict()   # Id -> distribution record
 _invalidations = AccountScopedDict()   # distribution_id -> [invalidation record, ...]
 _tags = AccountScopedDict()            # arn -> [{"Key": ..., "Value": ...}]
 _oacs = AccountScopedDict()            # Id -> OAC record
+_functions = AccountScopedDict()     # Name -> function record (CloudFront Functions API)
 
 
 def reset():
@@ -60,6 +69,7 @@ def reset():
     _invalidations.clear()
     _tags.clear()
     _oacs.clear()
+    _functions.clear()
 
 
 def get_state():
@@ -68,6 +78,7 @@ def get_state():
         "invalidations": _invalidations,
         "tags": _tags,
         "oacs": _oacs,
+        "functions": _functions,
     })
 
 
@@ -76,6 +87,7 @@ def restore_state(data):
     _invalidations.update(data.get("invalidations", {}))
     _tags.update(data.get("tags", {}))
     _oacs.update(data.get("oacs", {}))
+    _functions.update(data.get("functions", {}))
 
 
 try:
@@ -239,6 +251,249 @@ def _build_invalidation_xml(parent, inv):
 
 
 # ---------------------------------------------------------------------------
+# CloudFront Functions (Terraform aws_cloudfront_function / distribution associations)
+# ---------------------------------------------------------------------------
+
+
+def _qval(query_params, key, default=""):
+    v = query_params.get(key, default)
+    if isinstance(v, list):
+        return v[0] if v else default
+    return v if v is not None else default
+
+
+def _func_arn(name: str) -> str:
+    return f"arn:aws:cloudfront::{get_account_id()}:function/{name}"
+
+
+def _function_summary_builder(fn: dict, stage: str, status: str, last_modified: str):
+    def build(root):
+        fc = SubElement(root, "FunctionConfig")
+        SubElement(fc, "Comment").text = fn.get("comment", "")
+        kvs = SubElement(fc, "KeyValueStoreAssociations")
+        SubElement(kvs, "Quantity").text = "0"
+        SubElement(kvs, "Items")
+        SubElement(fc, "Runtime").text = fn["runtime"]
+        md = SubElement(root, "FunctionMetadata")
+        SubElement(md, "CreatedTime").text = fn["created"]
+        SubElement(md, "FunctionARN").text = fn["arn"]
+        SubElement(md, "LastModifiedTime").text = last_modified
+        SubElement(md, "Stage").text = stage
+        SubElement(root, "Name").text = fn["name"]
+        SubElement(root, "Status").text = status
+
+    return build
+
+
+def _cf_parse_function_config(cfg_el):
+    if cfg_el is None:
+        return None, _error("InvalidArgument", "FunctionConfig is required.", 400)
+    comment = _text(cfg_el, "Comment")
+    runtime = _text(cfg_el, "Runtime")
+    if not runtime:
+        return None, _error("InvalidArgument", "Runtime is required.", 400)
+    return {"comment": comment, "runtime": runtime}, None
+
+
+def _cf_decode_function_code(code_b64: str):
+    if not code_b64:
+        return None, _error("InvalidArgument", "FunctionCode is required.", 400)
+    try:
+        return base64.b64decode(code_b64.encode("ascii"), validate=True), None
+    except Exception:
+        return None, _error("InvalidArgument", "FunctionCode is not valid base64.", 400)
+
+
+def _cf_create_function(headers, body):
+    el = _parse_body(body)
+    if el is None:
+        return _error("MalformedXML", "The XML document is malformed.", 400)
+    name = _text(el, "Name")
+    if not name:
+        return _error("InvalidArgument", "Name is required.", 400)
+    if name in _functions:
+        return _error("FunctionAlreadyExists", "A function with the same name already exists in this account.", 409)
+
+    cfg_el = _find(el, "FunctionConfig")
+    cfg, err = _cf_parse_function_config(cfg_el)
+    if err is not None:
+        return err
+    code, err = _cf_decode_function_code(_text(el, "FunctionCode"))
+    if err is not None:
+        return err
+
+    now = _now_iso()
+    dev_etag = new_uuid()
+    fn = {
+        "name": name,
+        "arn": _func_arn(name),
+        "comment": cfg["comment"],
+        "runtime": cfg["runtime"],
+        "code": code,
+        "created": now,
+        "last_modified_dev": now,
+        "last_modified_live": None,
+        "dev_etag": dev_etag,
+        "live_etag": None,
+    }
+    _functions[name] = fn
+    logger.info("CreateFunction name=%s", name)
+
+    return _xml_response(
+        "FunctionSummary",
+        _function_summary_builder(fn, "DEVELOPMENT", "UNPUBLISHED", fn["last_modified_dev"]),
+        status=201,
+        extra_headers={
+            "ETag": dev_etag,
+            "Location": f"/2020-05-31/function/{name}",
+        },
+    )
+
+
+def _cf_list_functions(query_params):
+    stage_filter = _qval(query_params, "Stage", "")
+    summaries = []
+    for fn in _functions.values():
+        if stage_filter in ("", "DEVELOPMENT"):
+            summaries.append((fn, "DEVELOPMENT", "UNPUBLISHED", fn["last_modified_dev"]))
+        if stage_filter in ("", "LIVE") and fn["live_etag"]:
+            summaries.append(
+                (fn, "LIVE", "DEPLOYED", fn["last_modified_live"] or fn["last_modified_dev"])
+            )
+
+    def build(root):
+        SubElement(root, "MaxItems").text = "100"
+        SubElement(root, "NextMarker").text = ""
+        SubElement(root, "Quantity").text = str(len(summaries))
+        if not summaries:
+            return
+        items_el = SubElement(root, "Items")
+        for fn, stage, status, lm in summaries:
+            fs = SubElement(items_el, "FunctionSummary")
+            _function_summary_builder(fn, stage, status, lm)(fs)
+
+    return _xml_response("FunctionList", build)
+
+
+def _cf_describe_function(name: str, stage: str):
+    fn = _functions.get(name)
+    if not fn:
+        return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+    if stage == "LIVE":
+        if not fn["live_etag"]:
+            return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+        etag = fn["live_etag"]
+        lm = fn["last_modified_live"] or fn["last_modified_dev"]
+        st = "DEPLOYED"
+    elif stage == "DEVELOPMENT":
+        etag = fn["dev_etag"]
+        lm = fn["last_modified_dev"]
+        st = "UNPUBLISHED"
+    else:
+        return _error("InvalidArgument", "Invalid Stage value.", 400)
+
+    return _xml_response(
+        "FunctionSummary",
+        _function_summary_builder(fn, stage, st, lm),
+        extra_headers={"ETag": etag},
+    )
+
+
+def _cf_get_function(name: str, stage: str):
+    fn = _functions.get(name)
+    if not fn:
+        return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+    if stage == "LIVE":
+        if not fn["live_etag"]:
+            return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+        etag = fn["live_etag"]
+        code = fn["code"]
+    elif stage == "DEVELOPMENT":
+        etag = fn["dev_etag"]
+        code = fn["code"]
+    else:
+        return _error("InvalidArgument", "Invalid Stage value.", 400)
+
+    return 200, {"Content-Type": "application/javascript", "ETag": etag}, code
+
+
+def _cf_publish_function(name: str, headers):
+    fn = _functions.get(name)
+    if not fn:
+        return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+    if_match = headers.get("if-match", "")
+    if not if_match:
+        return _error("InvalidIfMatchVersion", "The If-Match version is missing or not valid for the resource.", 400)
+    if if_match != fn["dev_etag"]:
+        return _error("PreconditionFailed", "The precondition given in one or more of the request-header fields evaluated to false.", 412)
+
+    now = _now_iso()
+    fn["live_etag"] = new_uuid()
+    fn["last_modified_live"] = now
+    logger.info("PublishFunction name=%s", name)
+
+    lm = fn["last_modified_live"]
+    return _xml_response(
+        "FunctionSummary",
+        _function_summary_builder(fn, "LIVE", "DEPLOYED", lm),
+        extra_headers={"ETag": fn["live_etag"]},
+    )
+
+
+def _cf_update_function(name: str, headers, body):
+    fn = _functions.get(name)
+    if not fn:
+        return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+    if_match = headers.get("if-match", "")
+    if not if_match:
+        return _error("InvalidIfMatchVersion", "The If-Match version is missing or not valid for the resource.", 400)
+    if if_match != fn["dev_etag"]:
+        return _error("PreconditionFailed", "The precondition given in one or more of the request-header fields evaluated to false.", 412)
+
+    el = _parse_body(body)
+    if el is None:
+        return _error("MalformedXML", "The XML document is malformed.", 400)
+    cfg_el = _find(el, "FunctionConfig")
+    cfg, err = _cf_parse_function_config(cfg_el)
+    if err is not None:
+        return err
+    code, err = _cf_decode_function_code(_text(el, "FunctionCode"))
+    if err is not None:
+        return err
+
+    now = _now_iso()
+    fn["comment"] = cfg["comment"]
+    fn["runtime"] = cfg["runtime"]
+    fn["code"] = code
+    fn["last_modified_dev"] = now
+    fn["dev_etag"] = new_uuid()
+    fn["live_etag"] = None
+    fn["last_modified_live"] = None
+    logger.info("UpdateFunction name=%s", name)
+
+    return _xml_response(
+        "FunctionSummary",
+        _function_summary_builder(fn, "DEVELOPMENT", "UNPUBLISHED", fn["last_modified_dev"]),
+        extra_headers={"ETag": fn["dev_etag"]},
+    )
+
+
+def _cf_delete_function(name: str, headers):
+    fn = _functions.get(name)
+    if not fn:
+        return _error("NoSuchFunctionExists", "The specified function does not exist.", 404)
+    if_match = headers.get("if-match", "")
+    if not if_match:
+        return _error("InvalidIfMatchVersion", "The If-Match version is missing or not valid for the resource.", 400)
+    if if_match != fn["dev_etag"]:
+        return _error("PreconditionFailed", "The precondition given in one or more of the request-header fields evaluated to false.", 412)
+
+    del _functions[name]
+    logger.info("DeleteFunction name=%s", name)
+    return 204, {}, b""
+
+
+# ---------------------------------------------------------------------------
 # Request dispatcher
 # ---------------------------------------------------------------------------
 
@@ -317,6 +572,42 @@ async def handle_request(method, path, headers, body, query_params):
             return _get_oac(oac_id)
         if method == "DELETE":
             return _delete_oac(oac_id, headers)
+
+    # CloudFront Functions API (used by Terraform aws_cloudfront_function)
+    m = _FUN_DESCRIBE_RE.match(path)
+    if m:
+        name = m.group(1)
+        if method == "GET":
+            stage = _qval(query_params, "Stage", "")
+            if not stage:
+                return _error("InvalidArgument", "The Stage query string parameter is required.", 400)
+            return _cf_describe_function(name, stage)
+
+    m = _FUN_PUBLISH_RE.match(path)
+    if m:
+        name = m.group(1)
+        if method == "POST":
+            return _cf_publish_function(name, headers)
+
+    m = _FUN_NAME_RE.match(path)
+    if m:
+        name = m.group(1)
+        if method == "GET":
+            stage = _qval(query_params, "Stage", "")
+            if not stage:
+                return _error("InvalidArgument", "Stage is required.", 400)
+            return _cf_get_function(name, stage)
+        if method == "PUT":
+            return _cf_update_function(name, headers, body)
+        if method == "DELETE":
+            return _cf_delete_function(name, headers)
+
+    m = _FUN_LIST_RE.match(path)
+    if m:
+        if method == "POST":
+            return _cf_create_function(headers, body)
+        if method == "GET":
+            return _cf_list_functions(query_params)
 
     return _error("NoSuchResource", f"No route for {method} {path}", 404)
 
