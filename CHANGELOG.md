@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **EC2 `AuthorizeSecurityGroupIngress` duplicate rule error** — ingress authorization failed with `InvalidPermission.Duplicate` when Terraform (or other clients) re-submitted an unchanged rule, while egress already treated duplicates as a no-op. Ingress is now idempotent in the same way, so `aws_security_group` updates against MiniStack no longer fail on duplicate authorize calls.
+
+---
+
 ## [1.3.11] — 2026-04-24
 
 ### Added
